@@ -1,40 +1,41 @@
-# 🤖 Proxmox Helper Script — Paperclip AI
+# 🤖 Proxmox Helper Script — Paperclip AI (All-in-One)
 
 Dieses Repository steht unter der [MIT License](LICENSE).  
 Basierend auf [Paperclip AI](https://github.com/paperclipai/paperclip).
 
 💡 Entwickelt mit ❤️ für Proxmox-Homelab-Enthusiasten.
 
-> 🤖 „Run your AI company — not your tabs."
+> 🤖 „One command. One VM. One AI company."
 
 ---
 
 ## 🧩 Was dieses Script macht
 
-✅ Prüft das Betriebssystem (Ubuntu / Debian)  
-✅ Aktualisiert das System vollständig  
-✅ Installiert Node.js 20+ (via NodeSource)  
-✅ Installiert pnpm 9.15+ (Paketmanager)  
-✅ Klont Paperclip AI nach `/opt/paperclip`  
-✅ Installiert alle Node-Abhängigkeiten  
-✅ Erstellt `.env` Konfigurationsdatei  
-✅ Richtet systemd-Service ein (Autostart nach Neustart)  
-✅ Gibt am Ende die fertige Web-URL mit IP aus
+✅ Läuft direkt auf dem **Proxmox HOST** (keine manuelle VM nötig!)  
+✅ Lädt automatisch das **Ubuntu 24.04 Cloud-Image** herunter  
+✅ Erstellt eine neue **Ubuntu VM** (ID, RAM, CPU, Disk, Bridge – alles automatisch)  
+✅ Konfiguriert **Cloud-Init** (Hostname, Root-Passwort, SSH)  
+✅ Startet die VM und wartet auf Boot + IP-Adresse  
+✅ Installiert **Node.js 20**, **pnpm 9.15+** und alle Abhängigkeiten  
+✅ Klont **Paperclip AI** und richtet **systemd Autostart** ein  
+✅ Richtet die **Firewall** ein (Port 3100 + SSH)  
+✅ Gibt am Ende **IP-Adresse + fertige Web-URL** aus  
 
 ---
 
 ## ⚙️ Systemanforderungen
 
-| Komponente | Empfehlung |
+| Komponente | Anforderung |
 |---|---|
 | Proxmox VE | 7.x oder 8.x |
-| Betriebssystem der VM | Ubuntu 22.04 / 24.04 LTS |
-| RAM | ≥ 4 GB (8 GB empfohlen) |
-| Storage | ≥ 20 GB |
-| CPU | ≥ 2 Cores |
+| Ausführungsort | Proxmox **HOST** Shell (nicht in einer VM!) |
+| RAM für VM | ≥ 4 GB (8 GB empfohlen) |
+| Storage | ≥ 20 GB freier Platz |
+| CPU | ≥ 2 Cores für die VM |
+| Netzwerk | DHCP auf vmbr0 (Standard) |
 
-[![Proxmox](https://img.shields.io/badge/Proxmox-VE%208.x-orange?logo=proxmox)](https://www.proxmox.com)
-[![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%20%2F%2024.04%20LTS-blue?logo=ubuntu)](https://ubuntu.com)
+[![Proxmox](https://img.shields.io/badge/Proxmox-VE%207%2F8-orange?logo=proxmox)](https://www.proxmox.com)
+[![Ubuntu](https://img.shields.io/badge/Ubuntu-24.04%20LTS-blue?logo=ubuntu)](https://ubuntu.com)
 [![Node.js](https://img.shields.io/badge/Node.js-20+-green?logo=node.js)](https://nodejs.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -42,58 +43,92 @@ Basierend auf [Paperclip AI](https://github.com/paperclipai/paperclip).
 
 ## 🚀 Ein-Klick-Installation
 
-**Schritt 1:** Ubuntu VM in Proxmox erstellen (22.04 oder 24.04), starten und SSH öffnen.
-
-**Schritt 2:** Auf der VM als root ausführen:
+**Auf dem Proxmox HOST** in der Shell oder per SSH als root:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/HatchetMan111/proxmox-paperclip-helper/main/paperclip-install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/HatchetMan111/proxmox-paperclip-helper/main/paperclip-proxmox-install.sh)
 ```
 
-**Schritt 3:** Am Ende des Scripts wird die URL ausgegeben:
+Das Script fragt einmal nach Bestätigung der geplanten Konfiguration – danach läuft alles vollautomatisch.
+
+**Am Ende erscheint:**
 
 ```
-✅  PAPERCLIP ERFOLGREICH INSTALLIERT!
-🌐  Weboberfläche:  http://<VM-IP>:3100
+✅  PAPERCLIP AI VOLLSTÄNDIG INSTALLIERT!
+
+🚀  Paperclip URL:
+    http://<VM-IP>:3100
+
+🔑  SSH-Zugang:
+    ssh root@<VM-IP>
 ```
 
-Einfach die URL im Browser öffnen und Paperclip konfigurieren. 🎉
+Einfach die URL im Browser öffnen und loslegen. 🎉
+
+---
+
+## 🔧 Was passiert im Detail?
+
+```
+[Proxmox HOST]
+    │
+    ├─ 1. Ubuntu 24.04 Cloud-Image herunterladen
+    ├─ 2. Cloud-Init Snippet erstellen (Hostname, Passwort, SSH)
+    ├─ 3. VM erstellen (qm create + importdisk + cloudinit)
+    ├─ 4. VM starten + auf IP warten (via QEMU Guest Agent)
+    │
+    └─ 5. Per SSH in die VM → Paperclip installieren:
+              ├─ System updaten
+              ├─ Node.js 20 installieren
+              ├─ pnpm installieren
+              ├─ Paperclip klonen (/opt/paperclip)
+              ├─ pnpm install
+              ├─ .env erstellen
+              ├─ systemd Service einrichten
+              └─ Firewall (Port 3100 + 22)
+```
 
 ---
 
 ## 📋 Nützliche Befehle nach der Installation
 
 ```bash
-# Status prüfen
+# In die VM einloggen
+ssh root@<VM-IP>
+
+# Paperclip Status
 systemctl status paperclip
 
-# Live-Log ansehen
+# Live-Log
 journalctl -u paperclip -f
 
 # Neu starten
 systemctl restart paperclip
 
-# Stoppen
-systemctl stop paperclip
+# Konfiguration bearbeiten
+nano /opt/paperclip/.env
 ```
 
 ---
 
-## 📁 Installationspfade
+## 📁 Installationspfade (in der VM)
 
 | Pfad | Inhalt |
 |---|---|
 | `/opt/paperclip` | Paperclip Installationsverzeichnis |
 | `/opt/paperclip/.env` | Konfigurationsdatei (API Keys etc.) |
-| `/etc/systemd/system/paperclip.service` | Autostart-Service |
+| `/etc/systemd/system/paperclip.service` | systemd Autostart |
 
 ---
 
-## 🔧 Was ist Paperclip AI?
+## 🔐 Sicherheitshinweis
 
-[Paperclip](https://paperclip.ing) ist eine Open-Source-Plattform, um KI-Agenten  
-(Claude Code, OpenClaw, Codex, Cursor ...) als vollständiges Unternehmen zu orchestrieren:  
-mit Organigramm, Budgets, Zielen und Governance — alles in einem Dashboard.
+Das Script generiert ein zufälliges Root-Passwort für die VM und zeigt es am Ende an.  
+**Bitte notieren und danach ändern:**
+```bash
+ssh root@<VM-IP>
+passwd root
+```
 
 ---
 
