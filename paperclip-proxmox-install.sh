@@ -1,10 +1,8 @@
 #!/bin/bash
 
 # ============================================================
-#  Paperclip AI — Proxmox All-in-One Installer v2
+#  Paperclip AI — Proxmox All-in-One Installer v3
 #  Läuft auf dem PROXMOX HOST (nicht in der VM!)
-#  Erstellt automatisch eine Ubuntu VM + installiert Paperclip
-#
 #  by HatchetMan111 | github.com/HatchetMan111
 # ============================================================
 
@@ -40,26 +38,22 @@ cat <<'BANNER'
 |  __/ (_| | |_) |  __/ | | (__| | | |_) |
 |_|   \__,_| .__/ \___|_|  \___|_|_| .__/ 
             |_|                     |_|    
-  Proxmox All-in-One Installer v2
+  Proxmox All-in-One Installer v3
   VM erstellen + Paperclip AI installieren
   by HatchetMan111 | github.com/HatchetMan111
 BANNER
 echo -e "${NC}"
 
 # ── Proxmox-Host prüfen ──────────────────────────────────────
-[[ "$EUID" -ne 0 ]]           && error "Bitte als root auf dem PROXMOX HOST ausführen!"
-! command -v qm &>/dev/null   && error "'qm' nicht gefunden – Script muss auf dem Proxmox HOST laufen!"
+[[ "$EUID" -ne 0 ]]            && error "Bitte als root auf dem PROXMOX HOST ausführen!"
+! command -v qm    &>/dev/null && error "'qm' nicht gefunden – Script muss auf dem Proxmox HOST laufen!"
 ! command -v pvesh &>/dev/null && error "'pvesh' nicht gefunden – Script muss auf dem Proxmox HOST laufen!"
 
-# ── Abhängigkeiten installieren ──────────────────────────────
-step "Voraussetzungen prüfen & installieren"
-
+# ── Abhängigkeiten ────────────────────────────────────────────
+step "Voraussetzungen prüfen"
 apt-get update -qq 2>/dev/null
-for pkg in wget curl openssh-client python3; do
-  if ! dpkg -l "$pkg" &>/dev/null; then
-    info "$pkg wird installiert..."
-    apt-get install -y -qq "$pkg" 2>/dev/null || true
-  fi
+for pkg in wget curl openssh-client python3 whois; do
+  dpkg -l "$pkg" &>/dev/null || apt-get install -y -qq "$pkg" 2>/dev/null || true
 done
 success "Voraussetzungen erfüllt."
 
@@ -76,7 +70,6 @@ VM_RAM=4096
 VM_CORES=2
 VM_DISK_SIZE=20
 VM_BRIDGE="vmbr0"
-# Ubuntu 22.04: stabilster Stand für Cloud-Init + qemu-guest-agent
 UBUNTU_VERSION="22.04"
 PAPERCLIP_PORT=3100
 SSH_KEY_PATH="/root/.ssh/paperclip_vm_ed25519"
@@ -85,31 +78,32 @@ IMG_DIR="/var/lib/vz/template/iso"
 CLOUD_IMG_NAME="ubuntu-${UBUNTU_VERSION}-server-cloudimg-amd64.img"
 CLOUD_IMG_URL="https://cloud-images.ubuntu.com/releases/${UBUNTU_VERSION}/release/${CLOUD_IMG_NAME}"
 
-# Storage automatisch ermitteln
-VM_STORAGE=$(pvesm status --content images 2>/dev/null \
-  | awk 'NR>1 && $3=="active" {print $1; exit}' || true)
-
-if [[ -z "$VM_STORAGE" ]]; then
-  if pvesm status 2>/dev/null | grep -q "local-lvm"; then
-    VM_STORAGE="local-lvm"
-  elif pvesm status 2>/dev/null | grep -q "^local "; then
-    VM_STORAGE="local"
-  else
-    error "Kein Storage gefunden. Bitte VM_STORAGE manuell im Script setzen."
-  fi
+# Storage ermitteln — local-lvm bevorzugen (robust), sonst local
+if pvesm status 2>/dev/null | awk 'NR>1' | grep -q "local-lvm"; then
+  VM_STORAGE="local-lvm"
+elif pvesm status 2>/dev/null | awk 'NR>1' | grep -q "^local "; then
+  VM_STORAGE="local"
+else
+  VM_STORAGE=$(pvesm status --content images 2>/dev/null \
+    | awk 'NR>1 && $3=="active" {print $1; exit}' || true)
+  [[ -z "$VM_STORAGE" ]] && error "Kein Storage gefunden. Bitte VM_STORAGE manuell setzen."
 fi
+
+# Storage-Typ ermitteln (lvmthin, dir, zfspool ...)
+STORAGE_TYPE=$(pvesm status 2>/dev/null \
+  | awk -v s="$VM_STORAGE" '$1==s {print $2}' || echo "dir")
 
 echo ""
 echo -e "${BOLD}  Geplante Konfiguration:${NC}"
-echo -e "  VM-ID:     ${CYAN}${VM_ID}${NC}"
-echo -e "  VM-Name:   ${CYAN}${VM_NAME}${NC}"
-echo -e "  RAM:       ${CYAN}${VM_RAM} MB${NC}"
-echo -e "  CPU:       ${CYAN}${VM_CORES} Kerne${NC}"
-echo -e "  Disk:      ${CYAN}${VM_DISK_SIZE} GB${NC}"
-echo -e "  Storage:   ${CYAN}${VM_STORAGE}${NC}"
-echo -e "  Bridge:    ${CYAN}${VM_BRIDGE}${NC}"
-echo -e "  Ubuntu:    ${CYAN}${UBUNTU_VERSION} LTS${NC}"
-echo -e "  Port:      ${CYAN}${PAPERCLIP_PORT}${NC}"
+echo -e "  VM-ID:        ${CYAN}${VM_ID}${NC}"
+echo -e "  VM-Name:      ${CYAN}${VM_NAME}${NC}"
+echo -e "  RAM:          ${CYAN}${VM_RAM} MB${NC}"
+echo -e "  CPU:          ${CYAN}${VM_CORES} Kerne${NC}"
+echo -e "  Disk:         ${CYAN}${VM_DISK_SIZE} GB${NC}"
+echo -e "  Storage:      ${CYAN}${VM_STORAGE} (${STORAGE_TYPE})${NC}"
+echo -e "  Bridge:       ${CYAN}${VM_BRIDGE}${NC}"
+echo -e "  Ubuntu:       ${CYAN}${UBUNTU_VERSION} LTS${NC}"
+echo -e "  Paperclip:    ${CYAN}Port ${PAPERCLIP_PORT}${NC}"
 echo ""
 read -rp "  Fortfahren? [J/n]: " CONFIRM
 CONFIRM="${CONFIRM:-j}"
@@ -118,294 +112,272 @@ CONFIRM="${CONFIRM:-j}"
 # ─────────────────────────────────────────────────────────────
 step "Schritt 1/7 — SSH-Key generieren"
 # ─────────────────────────────────────────────────────────────
-# SSH-Key wird VOR der VM-Erstellung generiert und direkt in
-# Cloud-Init eingebettet. Kein Passwort, kein sshpass nötig.
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
 
-mkdir -p /root/.ssh
-chmod 700 /root/.ssh
-
-if [[ -f "$SSH_KEY_PATH" ]]; then
-  info "SSH-Key bereits vorhanden – wird wiederverwendet."
-else
-  info "Generiere SSH-Key für VM-Zugang..."
+if [[ ! -f "$SSH_KEY_PATH" ]]; then
+  info "Generiere SSH-Key..."
   ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "paperclip-installer" -q
-  success "SSH-Key generiert: $SSH_KEY_PATH"
 fi
 
 SSH_PUB_KEY=$(cat "${SSH_KEY_PATH}.pub")
-success "Public Key: ${SSH_PUB_KEY:0:40}..."
+success "SSH-Key bereit."
 
 # ─────────────────────────────────────────────────────────────
 step "Schritt 2/7 — Ubuntu Cloud-Image herunterladen"
 # ─────────────────────────────────────────────────────────────
-
 mkdir -p "$IMG_DIR"
 LOCAL_IMG="$IMG_DIR/$CLOUD_IMG_NAME"
 
 if [[ -f "$LOCAL_IMG" ]]; then
   success "Cloud-Image bereits vorhanden – überspringe Download."
 else
-  info "Lade Ubuntu ${UBUNTU_VERSION} Cloud-Image herunter..."
-  wget --progress=bar:force -O "$LOCAL_IMG" "$CLOUD_IMG_URL" 2>&1 || \
-    error "Download fehlgeschlagen. Prüfe Internetverbindung."
-  success "Cloud-Image heruntergeladen: $LOCAL_IMG"
+  info "Lade Ubuntu ${UBUNTU_VERSION} Cloud-Image..."
+  wget --progress=bar:force -O "$LOCAL_IMG" "$CLOUD_IMG_URL" 2>&1 \
+    || error "Download fehlgeschlagen. Prüfe Internetverbindung."
+  success "Cloud-Image heruntergeladen."
 fi
 
 # ─────────────────────────────────────────────────────────────
 step "Schritt 3/7 — Cloud-Init Snippet erstellen"
 # ─────────────────────────────────────────────────────────────
-
 mkdir -p "$SNIPPETS_DIR"
 
-# Snippets-Support auf local storage aktivieren
-CURRENT_CONTENT=$(pvesm status 2>/dev/null | awk '/^local / {print $6}' || true)
-if [[ "$CURRENT_CONTENT" != *"snippets"* ]]; then
-  info "Aktiviere Snippets-Support auf local storage..."
+# Snippets auf local aktivieren
+if ! pvesm status 2>/dev/null | awk '/^local /{print $6}' | grep -q "snippets"; then
+  info "Aktiviere Snippets auf local storage..."
   pvesm set local --content "snippets,iso,backup,images,rootdir" 2>/dev/null || true
 fi
 
-SNIPPET_FILE="${SNIPPETS_DIR}/paperclip-cloudinit.yaml"
-info "Erstelle Cloud-Init User-Data mit SSH-Key..."
+# Root-Passwort hashen (mkpasswd aus whois-Paket)
+VM_ROOT_PASS="Paperclip$(openssl rand -hex 6)"
+HASHED_PW=$(echo "$VM_ROOT_PASS" | mkpasswd --method=SHA-512 --stdin 2>/dev/null \
+  || openssl passwd -6 "$VM_ROOT_PASS")
 
-# WICHTIG:
-# - qemu-guest-agent: PFLICHT für automatische IP-Erkennung durch Proxmox
-# - ssh_authorized_keys: Key direkt eingebettet → kein Passwort-Login nötig
-# - package_upgrade: false → spart Boot-Zeit, Updates kommen später
-cat > "$SNIPPET_FILE" <<CLOUDINIT
+SNIPPET_FILE="${SNIPPETS_DIR}/paperclip-cloudinit.yaml"
+
+cat > "$SNIPPET_FILE" << CLOUDINIT
 #cloud-config
 hostname: paperclip-ai
 manage_etc_hosts: true
 fqdn: paperclip-ai.local
 
+# Root direkt konfigurieren — kein extra User
 users:
   - name: root
-    lock_passwd: true
+    lock_passwd: false
+    hashed_passwd: "${HASHED_PW}"
     shell: /bin/bash
     ssh_authorized_keys:
       - ${SSH_PUB_KEY}
 
-ssh_pwauth: false
+# Passwort-Login über SSH erlauben (Fallback)
+ssh_pwauth: true
 
+# Nur essentielle Pakete — kein package_upgrade (zu langsam)
 packages:
   - qemu-guest-agent
   - openssh-server
-  - curl
-  - git
-  - wget
-  - ca-certificates
-  - gnupg
-  - lsb-release
-  - build-essential
-  - ufw
 
 package_update: true
 package_upgrade: false
 
+# Dienste starten + SSH absichern
 runcmd:
+  - systemctl enable --now qemu-guest-agent
+  - systemctl enable --now ssh
   - mkdir -p /root/.ssh
   - chmod 700 /root/.ssh
   - echo "${SSH_PUB_KEY}" > /root/.ssh/authorized_keys
   - chmod 600 /root/.ssh/authorized_keys
-  - systemctl enable qemu-guest-agent
-  - systemctl start qemu-guest-agent
-  - systemctl enable ssh
-  - systemctl start ssh
+  - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+  - systemctl restart ssh
   - echo "CLOUDINIT_DONE" > /root/cloudinit-status.txt
 
-final_message: "Paperclip VM bereit!"
+final_message: "Paperclip VM bereit! Cloud-Init abgeschlossen nach \$UPTIME Sekunden."
 CLOUDINIT
 
-success "Cloud-Init Snippet erstellt: $SNIPPET_FILE"
+success "Cloud-Init Snippet erstellt."
 
 # ─────────────────────────────────────────────────────────────
 step "Schritt 4/7 — VM erstellen & konfigurieren"
 # ─────────────────────────────────────────────────────────────
 
-# Bestehende VM mit gleicher ID bereinigen
+# Bestehende VM bereinigen
 if qm status "$VM_ID" &>/dev/null; then
-  warn "VM ${VM_ID} existiert bereits – wird gestoppt und gelöscht..."
+  warn "VM ${VM_ID} existiert bereits – wird gelöscht..."
   qm stop "$VM_ID" --skiplock 2>/dev/null || true
   sleep 5
   qm destroy "$VM_ID" --purge 2>/dev/null || true
   sleep 3
 fi
 
-info "Erstelle VM ${VM_ID} (${VM_NAME})..."
+info "Erstelle VM ${VM_ID}..."
+
+# WICHTIG: Kein --serial0 / --vga serial0 für Cloud-Image VMs!
+# Das verursacht "starting serial terminal on interface serial0"
+# und blockiert die normale Konsole.
+# Cloud-Images brauchen: --vga std (oder qxl)
 qm create "$VM_ID" \
-  --name "$VM_NAME" \
-  --memory "$VM_RAM" \
-  --cores "$VM_CORES" \
-  --cpu "host" \
-  --net0 "virtio,bridge=${VM_BRIDGE}" \
-  --ostype "l26" \
-  --machine "q35" \
-  --bios "seabios" \
-  --scsihw "virtio-scsi-pci" \
-  --serial0 "socket" \
-  --vga "serial0" \
-  --onboot 1 \
-  --agent "enabled=1,fstrim_cloned_disks=1" \
+  --name      "$VM_NAME" \
+  --memory    "$VM_RAM" \
+  --cores     "$VM_CORES" \
+  --cpu       "host" \
+  --net0      "virtio,bridge=${VM_BRIDGE}" \
+  --ostype    "l26" \
+  --machine   "q35" \
+  --bios      "seabios" \
+  --scsihw    "virtio-scsi-pci" \
+  --vga       "std" \
+  --onboot    1 \
+  --agent     "enabled=1,fstrim_cloned_disks=1" \
   --description "Paperclip AI | github.com/HatchetMan111/-proxmox-paperclip-helper"
 
-success "VM Basis erstellt."
+success "VM erstellt."
 
-info "Importiere Cloud-Image als Disk in ${VM_STORAGE}..."
-IMPORT_OUT=$(qm importdisk "$VM_ID" "$LOCAL_IMG" "$VM_STORAGE" --format qcow2 2>&1)
-echo "$IMPORT_OUT" | tail -5
+# ── Disk importieren & Referenz ermitteln ─────────────────────
+info "Importiere Cloud-Image als Disk (${VM_STORAGE})..."
 
-# Disk-Referenz direkt aus importdisk-Output lesen.
-# "unused0: successfully imported disk 'local:200/vm-200-disk-0.qcow2'"
-# → wir extrahieren alles zwischen den einfachen Anführungszeichen
-DISK_REF=$(echo "$IMPORT_OUT" \
-  | grep -oP "(?<=')[^']+(?=')" \
-  | grep -v "^$" | tail -1 || true)
+IMPORT_OUTPUT=$(qm importdisk "$VM_ID" "$LOCAL_IMG" "$VM_STORAGE" --format qcow2 2>&1)
+echo "$IMPORT_OUTPUT" | tail -3
 
-# Fallback: aus qm config lesen (unused0-Zeile)
+# Disk-Referenz aus Output extrahieren
+# Mögliche Formate je nach Storage-Typ:
+#   dir/file:  "local:200/vm-200-disk-0.qcow2"
+#   lvm:       "local-lvm:vm-200-disk-0"
+DISK_REF=$(echo "$IMPORT_OUTPUT" \
+  | grep -oP "(?<=imported disk ')[^']+" 2>/dev/null || true)
+
+# Fallback: aus qm config lesen
 if [[ -z "$DISK_REF" ]]; then
   sleep 2
   DISK_REF=$(qm config "$VM_ID" 2>/dev/null \
-    | grep "^unused0:" \
-    | awk '{print $2}' || true)
+    | grep "^unused0:" | awk '{print $2}' || true)
 fi
 
-[[ -z "$DISK_REF" ]] && error "Disk-Referenz konnte nicht ermittelt werden.\nPrüfe: qm config ${VM_ID}"
-
+[[ -z "$DISK_REF" ]] && error "Disk-Referenz nicht ermittelbar. Prüfe: qm config ${VM_ID}"
 info "Disk-Referenz: ${DISK_REF}"
 
-info "Konfiguriere Boot, Cloud-Init & Disk..."
+# ── VM fertig konfigurieren ───────────────────────────────────
+info "Konfiguriere Disk, Boot & Cloud-Init..."
 qm set "$VM_ID" \
-  --scsi0 "${DISK_REF},discard=on" \
-  --boot "order=scsi0" \
-  --ide2 "${VM_STORAGE}:cloudinit" \
-  --cicustom "user=local:snippets/paperclip-cloudinit.yaml" \
-  --ipconfig0 "ip=dhcp" \
-  --sshkeys "${SSH_KEY_PATH}.pub"
+  --scsi0     "${DISK_REF},discard=on" \
+  --boot      "order=scsi0" \
+  --ide2      "${VM_STORAGE}:cloudinit" \
+  --cicustom  "user=local:snippets/paperclip-cloudinit.yaml" \
+  --ipconfig0 "ip=dhcp"
+
+info "Setze SSH-Key in Proxmox Cloud-Init..."
+# Datei muss für pvesh URL-encoded übergeben werden → direkt als Option
+qm set "$VM_ID" --sshkeys "${SSH_KEY_PATH}.pub" 2>/dev/null || true
 
 info "Vergrößere Disk auf ${VM_DISK_SIZE}GB..."
 qm resize "$VM_ID" scsi0 "${VM_DISK_SIZE}G"
 
-success "VM vollständig konfiguriert (ID: ${VM_ID})."
+# Cloud-Init Image neu generieren
+qm cloudinit update "$VM_ID" 2>/dev/null || true
+
+success "VM vollständig konfiguriert."
+info "Aktuelle VM-Konfiguration:"
+qm config "$VM_ID"
 
 # ─────────────────────────────────────────────────────────────
 step "Schritt 5/7 — VM starten & IP ermitteln"
 # ─────────────────────────────────────────────────────────────
-
 info "Starte VM ${VM_ID}..."
 qm start "$VM_ID"
 
 VM_IP=""
-MAX_WAIT=300  # 5 Minuten: Cloud-Init mit package_update braucht Zeit
-
-info "Warte auf QEMU Guest Agent + IP-Adresse..."
-info "(Cloud-Init installiert Pakete inkl. qemu-guest-agent — bitte ~90 Sek. warten)"
+info "Warte auf QEMU Guest Agent..."
+info "(Cloud-Init installiert qemu-guest-agent — bitte ca. 60-120 Sek. warten)"
 echo ""
 
-for i in $(seq 1 $MAX_WAIT); do
+# Warte bis Guest Agent meldet sich UND eine gültige IP liefert
+for i in $(seq 1 360); do
   sleep 1
 
-  # Methode 1: QEMU Guest Agent — direkte IP-Abfrage
   VM_IP=$(qm guest cmd "$VM_ID" network-get-interfaces 2>/dev/null \
     | python3 -c "
 import sys, json
 try:
-    data = json.load(sys.stdin)
-    for iface in data:
-        name = iface.get('name','')
-        # Loopback, Docker, Bridge-Interfaces überspringen
-        skip = ['lo','docker','br-','virbr','veth']
-        if any(name.startswith(s) for s in skip):
+    for iface in json.load(sys.stdin):
+        n = iface.get('name','')
+        if n == 'lo' or n.startswith(('docker','br-','veth','virbr')):
             continue
-        for addr in iface.get('ip-addresses', []):
-            if addr.get('ip-address-type') == 'ipv4':
-                ip = addr['ip-address']
-                # Loopback und Link-Local ignorieren
-                if not ip.startswith('127.') and not ip.startswith('169.254.'):
-                    print(ip)
-                    sys.exit(0)
-except Exception:
-    pass
+        for a in iface.get('ip-addresses',[]):
+            if a.get('ip-address-type') == 'ipv4':
+                ip = a['ip-address']
+                if not ip.startswith(('127.','169.254.')):
+                    print(ip); sys.exit(0)
+except: pass
 " 2>/dev/null || true)
 
   if [[ -n "$VM_IP" ]]; then
     echo ""
-    success "IP via QEMU Guest Agent gefunden: ${VM_IP}"
+    success "IP via Guest Agent: ${VM_IP}"
     break
   fi
 
-  # Fortschrittsbalken
-  if (( i % 15 == 0 )); then
-    printf "\r  ${CYAN}[%3d/%d Sek.]${NC} Warte auf Guest Agent + IP...    " "$i" "$MAX_WAIT"
-  fi
+  # Fortschritt alle 10 Sek.
+  (( i % 10 == 0 )) && \
+    printf "\r  ${CYAN}[%3d/360 Sek.]${NC} Warte auf Guest Agent...   " "$i"
 done
 echo ""
 
-# Methode 2: MAC → DHCP Lease / ARP
+# Fallback: MAC → ARP
 if [[ -z "$VM_IP" ]]; then
-  info "Fallback: Suche IP über MAC-Adresse..."
+  warn "Guest Agent hat keine IP geliefert. Versuche Fallbacks..."
 
   VM_MAC=$(qm config "$VM_ID" 2>/dev/null \
-    | grep -i "^net0" \
+    | grep "^net0" \
     | grep -oiP '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' \
-    | head -1 | tr '[:upper:]' '[:lower:]' || true)
+    | tr '[:upper:]' '[:lower:]' | head -1 || true)
 
   if [[ -n "$VM_MAC" ]]; then
     info "VM MAC: $VM_MAC"
-
-    # dnsmasq Leases
+    # dnsmasq
     for f in /var/lib/misc/dnsmasq.leases /var/lib/dnsmasq/dnsmasq.leases; do
-      [[ -f "$f" ]] && VM_IP=$(grep -i "$VM_MAC" "$f" | awk '{print $3}' | head -1 || true)
-      [[ -n "$VM_IP" ]] && break
+      [[ -f "$f" ]] && VM_IP=$(grep -i "$VM_MAC" "$f" | awk '{print $3}' | head -1) && break
     done
-
-    # ARP-Tabelle
-    if [[ -z "$VM_IP" ]]; then
-      sleep 5
-      VM_IP=$(arp -an 2>/dev/null \
-        | grep -i "$VM_MAC" \
-        | grep -oP '\d+\.\d+\.\d+\.\d+' \
-        | head -1 || true)
-    fi
-
+    # ARP
+    [[ -z "$VM_IP" ]] && VM_IP=$(arp -an 2>/dev/null \
+      | grep -i "$VM_MAC" | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1 || true)
     # ip neigh
-    if [[ -z "$VM_IP" ]]; then
-      VM_IP=$(ip neigh 2>/dev/null \
-        | grep -i "$VM_MAC" \
-        | grep -oP '\d+\.\d+\.\d+\.\d+' \
-        | head -1 || true)
-    fi
+    [[ -z "$VM_IP" ]] && VM_IP=$(ip neigh 2>/dev/null \
+      | grep -i "$VM_MAC" | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1 || true)
   fi
 fi
 
-# Manuell fragen als letzter Ausweg
+# Manuell
 if [[ -z "$VM_IP" ]]; then
   echo ""
   warn "Automatische IP-Erkennung fehlgeschlagen."
-  echo -e "  ${YELLOW}→ Öffne Proxmox Weboberfläche → VM ${VM_ID} → Konsole${NC}"
-  echo -e "  ${YELLOW}→ Warte bis Login erscheint, dann: ip addr show${NC}"
+  echo -e "  ${YELLOW}→ Proxmox Weboberfläche → VM ${VM_ID} → Summary → IPs${NC}"
+  echo -e "  ${YELLOW}→ oder in VM-Konsole: ip addr show${NC}"
   echo ""
-  read -rp "  VM IP-Adresse eingeben: " VM_IP
-  [[ -n "$VM_IP" ]] || error "Keine IP angegeben – Abbruch."
+  read -rp "  VM IP-Adresse manuell eingeben: " VM_IP
+  [[ -n "$VM_IP" ]] || error "Keine IP angegeben."
 fi
 
-# ── SSH-Verbindung warten ─────────────────────────────────────
+# ── SSH warten ────────────────────────────────────────────────
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes -i ${SSH_KEY_PATH}"
 SSH_OK=false
 
-info "Warte auf SSH an ${VM_IP} (max. 3 Min.)..."
-for i in $(seq 1 36); do
-  if ssh $SSH_OPTS root@"$VM_IP" "echo ok" &>/dev/null 2>&1; then
-    SSH_OK=true
-    break
+info "Warte auf SSH an ${VM_IP}..."
+for i in $(seq 1 40); do
+  if ssh $SSH_OPTS root@"$VM_IP" "echo ok" &>/dev/null; then
+    SSH_OK=true; break
   fi
-  printf "\r  ${CYAN}SSH-Versuch %d/36...${NC}  " "$i"
+  printf "\r  ${CYAN}SSH-Versuch %2d/40...${NC}  " "$i"
   sleep 5
 done
 echo ""
 
 if [[ "$SSH_OK" == false ]]; then
-  warn "SSH noch nicht bereit – warte weitere 90 Sek. (Cloud-Init läuft noch)..."
-  sleep 90
-  ssh $SSH_OPTS root@"$VM_IP" "echo ok" &>/dev/null 2>&1 \
+  warn "SSH noch nicht bereit. Warte weitere 60 Sek. (Cloud-Init läuft noch)..."
+  sleep 60
+  ssh $SSH_OPTS root@"$VM_IP" "echo ok" &>/dev/null \
     && SSH_OK=true \
     || error "SSH nicht erreichbar.\nManuelle Verbindung: ssh -i ${SSH_KEY_PATH} root@${VM_IP}"
 fi
@@ -415,31 +387,23 @@ success "SSH-Verbindung zu ${VM_IP} erfolgreich!"
 # ─────────────────────────────────────────────────────────────
 step "Schritt 6/7 — Paperclip in der VM installieren"
 # ─────────────────────────────────────────────────────────────
+info "Starte Paperclip-Installation in der VM..."
 
-info "Starte Paperclip-Installation auf ${VM_IP}..."
-
-# Heredoc mit einfachen Anführungszeichen → keine lokale Variable-Expansion
 ssh $SSH_OPTS root@"$VM_IP" 'bash -s' << 'REMOTE_SCRIPT'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export PAPERCLIP_TELEMETRY_DISABLED=1
 
 echo ""
-echo "==> [1/6] System-Pakete aktualisieren..."
+echo "==> [1/6] System-Pakete installieren..."
 apt-get update -qq
 apt-get install -y -qq \
   curl git wget gnupg ca-certificates lsb-release \
   software-properties-common build-essential ufw
 
 echo "==> [2/6] Node.js 20 installieren..."
-if command -v node &>/dev/null; then
-  NODE_VER=$(node -v | sed 's/v//' | cut -d. -f1)
-  if [[ "$NODE_VER" -ge 20 ]]; then
-    echo "    Node.js $(node -v) bereits vorhanden – überspringe."
-  else
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>/dev/null
-    apt-get install -y -qq nodejs
-  fi
+if command -v node &>/dev/null && [[ $(node -v | sed 's/v//' | cut -d. -f1) -ge 20 ]]; then
+  echo "    Node.js $(node -v) bereits vorhanden."
 else
   curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>/dev/null
   apt-get install -y -qq nodejs
@@ -450,36 +414,32 @@ echo "==> [3/6] pnpm installieren..."
 npm install -g pnpm --quiet 2>/dev/null || npm install -g pnpm
 export PNPM_HOME="/root/.local/share/pnpm"
 export PATH="$PNPM_HOME:$PATH"
-
-# Dauerhaft in Shell-Profile eintragen
-grep -q "PNPM_HOME" /root/.bashrc 2>/dev/null || cat >> /root/.bashrc << 'BASHEOF'
+grep -q "PNPM_HOME" /root/.bashrc 2>/dev/null || cat >> /root/.bashrc << 'BEOF'
 export PNPM_HOME="/root/.local/share/pnpm"
 export PATH="$PNPM_HOME:$PATH"
-BASHEOF
-grep -q "PNPM_HOME" /root/.profile 2>/dev/null || cat >> /root/.profile << 'PROFEOF'
+BEOF
+grep -q "PNPM_HOME" /root/.profile 2>/dev/null || cat >> /root/.profile << 'PEOF'
 export PNPM_HOME="/root/.local/share/pnpm"
 export PATH="$PNPM_HOME:$PATH"
-PROFEOF
-
+PEOF
 echo "    pnpm $(pnpm -v) bereit."
 
 echo "==> [4/6] Paperclip klonen..."
 if [[ -d /opt/paperclip/.git ]]; then
   cd /opt/paperclip && git pull --quiet
-  echo "    Aktualisiert: $(git log --oneline -1)"
 else
   rm -rf /opt/paperclip
   git clone --depth=1 https://github.com/paperclipai/paperclip.git /opt/paperclip --quiet
-  echo "    Geklont: $(cd /opt/paperclip && git log --oneline -1)"
 fi
+echo "    $(cd /opt/paperclip && git log --oneline -1)"
 
 echo "==> [5/6] Dependencies installieren (2-5 Min.)..."
 cd /opt/paperclip
 pnpm install --frozen-lockfile 2>&1 | tail -5 || pnpm install 2>&1 | tail -5
 
-echo "==> [6/6] Dienst & Firewall konfigurieren..."
+echo "==> [6/6] Service & Firewall einrichten..."
 
-# .env erstellen
+# .env
 if [[ ! -f /opt/paperclip/.env ]]; then
   [[ -f /opt/paperclip/.env.example ]] \
     && cp /opt/paperclip/.env.example /opt/paperclip/.env \
@@ -488,10 +448,8 @@ fi
 grep -q "PAPERCLIP_TELEMETRY_DISABLED" /opt/paperclip/.env \
   || echo "PAPERCLIP_TELEMETRY_DISABLED=1" >> /opt/paperclip/.env
 
-# pnpm-Pfad ermitteln
 PNPM_BIN=$(which pnpm 2>/dev/null || echo "/root/.local/share/pnpm/pnpm")
 
-# systemd Service
 cat > /etc/systemd/system/paperclip.service << SVCEOF
 [Unit]
 Description=Paperclip AI Orchestration Server
@@ -523,22 +481,19 @@ systemctl daemon-reload
 systemctl enable paperclip --quiet
 systemctl start paperclip
 
-# Firewall
-ufw allow 22/tcp   --quiet 2>/dev/null || true
-ufw allow 3100/tcp --quiet 2>/dev/null || true
-ufw --force enable         2>/dev/null || true
+ufw allow 22/tcp    --quiet 2>/dev/null || true
+ufw allow 3100/tcp  --quiet 2>/dev/null || true
+ufw --force enable          2>/dev/null || true
 
 echo "PAPERCLIP_INSTALL_DONE" > /root/paperclip-install-status.txt
-echo ""
-echo "    Installation in VM erfolgreich abgeschlossen!"
+echo "    Fertig!"
 REMOTE_SCRIPT
 
-success "Paperclip erfolgreich in VM installiert."
+success "Paperclip in VM installiert."
 
 # ─────────────────────────────────────────────────────────────
 step "Schritt 7/7 — Dienst prüfen"
 # ─────────────────────────────────────────────────────────────
-
 sleep 10
 STATUS=$(ssh $SSH_OPTS root@"$VM_IP" \
   "systemctl is-active paperclip 2>/dev/null || echo unknown" 2>/dev/null || echo "ssh-error")
@@ -546,47 +501,39 @@ STATUS=$(ssh $SSH_OPTS root@"$VM_IP" \
 case "$STATUS" in
   active)     success "Paperclip Service: aktiv ✓" ;;
   activating) success "Paperclip Service: startet – normal beim ersten Start ✓" ;;
-  *)          warn    "Service-Status: ${STATUS} — prüfe: journalctl -u paperclip -f" ;;
+  *)          warn    "Service-Status: ${STATUS}" ;;
 esac
-
-DONE=$(ssh $SSH_OPTS root@"$VM_IP" \
-  "cat /root/paperclip-install-status.txt 2>/dev/null || echo NOT_FOUND" 2>/dev/null || echo "error")
-[[ "$DONE" == *"DONE"* ]] \
-  && success "Installations-Check: bestanden ✓" \
-  || warn "Status-Datei nicht gefunden – Installation evtl. unvollständig."
 
 # ─────────────────────────────────────────────────────────────
 #  ABSCHLUSS
 # ─────────────────────────────────────────────────────────────
-
 echo ""
 echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BOLD}${GREEN}║   ✅  PAPERCLIP AI VOLLSTÄNDIG INSTALLIERT!              ║${NC}"
 echo -e "${BOLD}${GREEN}╠══════════════════════════════════════════════════════════╣${NC}"
 echo -e "${BOLD}${GREEN}║                                                          ║${NC}"
 printf  "${BOLD}${GREEN}║  🖥️   VM-ID:     %-42s║${NC}\n" "$VM_ID"
-printf  "${BOLD}${GREEN}║  📛  VM-Name:   %-42s║${NC}\n" "$VM_NAME"
 printf  "${BOLD}${GREEN}║  🌐  VM-IP:     %-42s║${NC}\n" "$VM_IP"
 echo -e "${BOLD}${GREEN}║                                                          ║${NC}"
-echo -e "${BOLD}${CYAN}║  🚀  Paperclip öffnen im Browser:                        ║${NC}"
+echo -e "${BOLD}${CYAN}║  🚀  Paperclip öffnen:                                   ║${NC}"
 printf  "${BOLD}${CYAN}║      http://%-47s║${NC}\n" "${VM_IP}:${PAPERCLIP_PORT}"
 echo -e "${BOLD}${GREEN}║                                                          ║${NC}"
-echo -e "${BOLD}${GREEN}║  🔑  SSH-Zugang (ohne Passwort):                         ║${NC}"
+echo -e "${BOLD}${GREEN}║  🔑  SSH (Key):                                          ║${NC}"
 printf  "${BOLD}${GREEN}║      ssh -i %-47s║${NC}\n" "${SSH_KEY_PATH} root@${VM_IP}"
+printf  "${BOLD}${GREEN}║  🔑  SSH (Passwort): %-39s║${NC}\n" "$VM_ROOT_PASS"
 echo -e "${BOLD}${GREEN}║                                                          ║${NC}"
-echo -e "${BOLD}${GREEN}║  📋  Nützliche Befehle auf der VM:                       ║${NC}"
+echo -e "${BOLD}${GREEN}║  📋  Auf der VM:                                         ║${NC}"
 echo -e "${BOLD}${GREEN}║      systemctl status paperclip                          ║${NC}"
-echo -e "${BOLD}${GREEN}║      journalctl -u paperclip -f    (Live-Log)            ║${NC}"
+echo -e "${BOLD}${GREEN}║      journalctl -u paperclip -f                          ║${NC}"
 echo -e "${BOLD}${GREEN}║      systemctl restart paperclip                         ║${NC}"
 echo -e "${BOLD}${GREEN}║                                                          ║${NC}"
-echo -e "${BOLD}${GREEN}║  📁  Paperclip:  /opt/paperclip                          ║${NC}"
-echo -e "${BOLD}${GREEN}║  ⚙️   Config:     /opt/paperclip/.env                     ║${NC}"
-echo -e "${BOLD}${GREEN}║  📖  Docs:       https://paperclip.ing/docs              ║${NC}"
+echo -e "${BOLD}${GREEN}║  📁  /opt/paperclip  |  ⚙️  /opt/paperclip/.env          ║${NC}"
+echo -e "${BOLD}${GREEN}║  📖  https://paperclip.ing/docs                          ║${NC}"
 echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
+echo ""
+echo -e "  ${YELLOW}Passwort notieren:${NC} ${VM_ROOT_PASS}"
+echo -e "  ${YELLOW}Danach ändern mit:${NC} passwd root  (in der VM)"
 echo ""
 echo -e "  ${YELLOW}Hinweis:${NC} Beim ersten Start lädt Paperclip seine Datenbank."
 echo -e "  Bitte 30-60 Sek. warten, dann URL im Browser öffnen."
-echo ""
-echo -e "  ${YELLOW}SSH-Key liegt auf deinem Proxmox-Host:${NC}"
-echo -e "  ${CYAN}${SSH_KEY_PATH}${NC}"
 echo ""
