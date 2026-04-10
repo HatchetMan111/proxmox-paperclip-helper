@@ -250,11 +250,31 @@ qm create "$VM_ID" \
 success "VM Basis erstellt."
 
 info "Importiere Cloud-Image als Disk in ${VM_STORAGE}..."
-qm importdisk "$VM_ID" "$LOCAL_IMG" "$VM_STORAGE" --format qcow2 2>&1 | tail -3
+IMPORT_OUT=$(qm importdisk "$VM_ID" "$LOCAL_IMG" "$VM_STORAGE" --format qcow2 2>&1)
+echo "$IMPORT_OUT" | tail -5
+
+# Disk-Referenz direkt aus importdisk-Output lesen.
+# "unused0: successfully imported disk 'local:200/vm-200-disk-0.qcow2'"
+# → wir extrahieren alles zwischen den einfachen Anführungszeichen
+DISK_REF=$(echo "$IMPORT_OUT" \
+  | grep -oP "(?<=')[^']+(?=')" \
+  | grep -v "^$" | tail -1 || true)
+
+# Fallback: aus qm config lesen (unused0-Zeile)
+if [[ -z "$DISK_REF" ]]; then
+  sleep 2
+  DISK_REF=$(qm config "$VM_ID" 2>/dev/null \
+    | grep "^unused0:" \
+    | awk '{print $2}' || true)
+fi
+
+[[ -z "$DISK_REF" ]] && error "Disk-Referenz konnte nicht ermittelt werden.\nPrüfe: qm config ${VM_ID}"
+
+info "Disk-Referenz: ${DISK_REF}"
 
 info "Konfiguriere Boot, Cloud-Init & Disk..."
 qm set "$VM_ID" \
-  --scsi0 "${VM_STORAGE}:vm-${VM_ID}-disk-0,discard=on" \
+  --scsi0 "${DISK_REF},discard=on" \
   --boot "order=scsi0" \
   --ide2 "${VM_STORAGE}:cloudinit" \
   --cicustom "user=local:snippets/paperclip-cloudinit.yaml" \
