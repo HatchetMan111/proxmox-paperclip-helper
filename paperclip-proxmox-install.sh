@@ -1,7 +1,11 @@
 #!/bin/bash
 # ============================================================
-#  Paperclip AI — Proxmox All-in-One Installer
-#  Ausführen auf dem PROXMOX HOST als root
+#  Paperclip AI — Proxmox Installer
+#
+#  Verwendung (in der Proxmox Shell):
+#    wget -O install.sh https://raw.githubusercontent.com/HatchetMan111/-proxmox-paperclip-helper/main/paperclip-proxmox-install.sh
+#    bash install.sh
+#
 #  by HatchetMan111 | github.com/HatchetMan111
 # ============================================================
 set -euo pipefail
@@ -13,7 +17,12 @@ info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error()   { echo -e "${RED}[FEHLER]${NC} $*"; exit 1; }
-step()    { echo ""; echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; echo -e "${BOLD}${YELLOW}  $*${NC}"; echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
+step()    {
+  echo ""
+  echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo -e "${BOLD}${YELLOW}  $*${NC}"
+  echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
 
 clear
 echo -e "${BOLD}${CYAN}"
@@ -29,12 +38,13 @@ cat <<'BANNER'
 BANNER
 echo -e "${NC}"
 
-# ── Proxmox Host prüfen ──────────────────────────────────────
-[[ "$EUID" -ne 0 ]]            && error "Bitte als root auf dem PROXMOX HOST ausführen!"
-! command -v qm    &>/dev/null && error "'qm' nicht gefunden — Script muss auf dem Proxmox HOST laufen!"
-! command -v pvesh &>/dev/null && error "'pvesh' nicht gefunden — Script muss auf dem Proxmox HOST laufen!"
+# ── Sanity Checks ────────────────────────────────────────────
+[[ "$EUID" -ne 0 ]]            && error "Bitte als root ausführen!"
+! command -v qm    &>/dev/null && error "'qm' nicht gefunden — bitte auf dem Proxmox HOST ausführen!"
+! command -v pvesh &>/dev/null && error "'pvesh' nicht gefunden — bitte auf dem Proxmox HOST ausführen!"
 
-step "Schritt 1/7 — Voraussetzungen"
+# ── Abhängigkeiten auf dem Host ──────────────────────────────
+step "Voraussetzungen prüfen"
 apt-get update -qq 2>/dev/null
 for pkg in wget curl openssh-client python3 whois; do
   dpkg -l "$pkg" &>/dev/null || apt-get install -y -qq "$pkg" 2>/dev/null || true
@@ -61,56 +71,50 @@ CLOUD_IMG_NAME="ubuntu-${UBUNTU_VERSION}-server-cloudimg-amd64.img"
 CLOUD_IMG_URL="https://cloud-images.ubuntu.com/releases/${UBUNTU_VERSION}/release/${CLOUD_IMG_NAME}"
 
 # Storage ermitteln
-if pvesm status 2>/dev/null | awk 'NR>1 {print $1}' | grep -q "^local-lvm$"; then
+if pvesm status 2>/dev/null | awk 'NR>1{print $1}' | grep -q "^local-lvm$"; then
   VM_STORAGE="local-lvm"
-elif pvesm status 2>/dev/null | awk 'NR>1 {print $1}' | grep -q "^local$"; then
-  VM_STORAGE="local"
 else
-  VM_STORAGE=$(pvesm status --content images 2>/dev/null | awk 'NR>1 && $3=="active" {print $1; exit}' || true)
-  [[ -z "$VM_STORAGE" ]] && error "Kein Storage gefunden."
+  VM_STORAGE="local"
 fi
+STORAGE_TYPE=$(pvesm status 2>/dev/null | awk -v s="$VM_STORAGE" '$1==s{print $2}' || echo "dir")
 
-STORAGE_TYPE=$(pvesm status 2>/dev/null | awk -v s="$VM_STORAGE" '$1==s {print $2}')
-
-echo -e "  VM-ID:     ${CYAN}${VM_ID}${NC}"
-echo -e "  Storage:   ${CYAN}${VM_STORAGE} (${STORAGE_TYPE})${NC}"
-echo -e "  Bridge:    ${CYAN}${VM_BRIDGE}${NC}"
-echo -e "  RAM:       ${CYAN}${VM_RAM} MB${NC}  CPU: ${CYAN}${VM_CORES}${NC}  Disk: ${CYAN}${VM_DISK_SIZE}GB${NC}"
-echo -e "  Ubuntu:    ${CYAN}${UBUNTU_VERSION} LTS${NC}  Port: ${CYAN}${PAPERCLIP_PORT}${NC}"
+echo -e "  VM-ID:    ${CYAN}${VM_ID}${NC}"
+echo -e "  Storage:  ${CYAN}${VM_STORAGE} (${STORAGE_TYPE})${NC}"
+echo -e "  RAM:      ${CYAN}${VM_RAM} MB${NC}  |  CPU: ${CYAN}${VM_CORES}${NC}  |  Disk: ${CYAN}${VM_DISK_SIZE}GB${NC}"
+echo -e "  Ubuntu:   ${CYAN}${UBUNTU_VERSION} LTS${NC}  |  Port: ${CYAN}${PAPERCLIP_PORT}${NC}"
 echo ""
 read -rp "  Fortfahren? [J/n]: " CONFIRM
 CONFIRM="${CONFIRM:-j}"
 [[ "$CONFIRM" =~ ^[jJyY]$ ]] || error "Abgebrochen."
 
-# ── Schritt 2: SSH-Key ───────────────────────────────────────
-step "Schritt 2/7 — SSH-Key generieren"
+# ── SSH-Key ──────────────────────────────────────────────────
+step "Schritt 1/6 — SSH-Key generieren"
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 if [[ ! -f "$SSH_KEY_PATH" ]]; then
   ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "paperclip-installer" -q
 fi
 SSH_PUB_KEY=$(cat "${SSH_KEY_PATH}.pub")
-success "SSH-Key bereit: ${SSH_KEY_PATH}"
+success "SSH-Key: ${SSH_KEY_PATH}"
 
-# ── Schritt 3: Cloud-Image ───────────────────────────────────
-step "Schritt 3/7 — Ubuntu Cloud-Image herunterladen"
+# ── Cloud-Image ──────────────────────────────────────────────
+step "Schritt 2/6 — Ubuntu ${UBUNTU_VERSION} Cloud-Image"
 mkdir -p "$IMG_DIR"
 LOCAL_IMG="$IMG_DIR/$CLOUD_IMG_NAME"
 if [[ -f "$LOCAL_IMG" ]]; then
   success "Cloud-Image bereits vorhanden."
 else
-  info "Lade Ubuntu ${UBUNTU_VERSION}..."
-  wget --progress=bar:force -O "$LOCAL_IMG" "$CLOUD_IMG_URL" 2>&1 || error "Download fehlgeschlagen."
-  success "Cloud-Image heruntergeladen."
+  info "Lade Ubuntu ${UBUNTU_VERSION} herunter..."
+  wget --progress=bar:force -O "$LOCAL_IMG" "$CLOUD_IMG_URL" 2>&1 \
+    || error "Download fehlgeschlagen."
+  success "Download abgeschlossen."
 fi
 
-# ── Schritt 4: Cloud-Init Snippet ───────────────────────────
-step "Schritt 4/7 — Cloud-Init konfigurieren"
+# ── Cloud-Init ───────────────────────────────────────────────
+step "Schritt 3/6 — Cloud-Init konfigurieren"
 mkdir -p "$SNIPPETS_DIR"
 
 # Snippets auf local aktivieren
-if ! pvesm status 2>/dev/null | awk '/^local /{print $6}' | grep -q "snippets"; then
-  pvesm set local --content "snippets,iso,backup,images,rootdir" 2>/dev/null || true
-fi
+pvesm set local --content "snippets,iso,backup,images,rootdir" 2>/dev/null || true
 
 VM_ROOT_PASS="Paperclip$(openssl rand -hex 6)"
 HASHED_PW=$(echo "$VM_ROOT_PASS" | mkpasswd --method=SHA-512 --stdin 2>/dev/null \
@@ -154,8 +158,8 @@ CLOUDINIT
 
 success "Cloud-Init Snippet erstellt."
 
-# ── Schritt 5: VM erstellen ──────────────────────────────────
-step "Schritt 5/7 — VM erstellen"
+# ── VM erstellen ─────────────────────────────────────────────
+step "Schritt 4/6 — VM erstellen & starten"
 
 if qm status "$VM_ID" &>/dev/null; then
   warn "VM ${VM_ID} existiert — wird gelöscht..."
@@ -181,20 +185,19 @@ qm create "$VM_ID" \
   --agent     "enabled=1,fstrim_cloned_disks=1" \
   --description "Paperclip AI | github.com/HatchetMan111/-proxmox-paperclip-helper"
 
-info "Importiere Disk..."
-IMPORT_OUTPUT=$(qm importdisk "$VM_ID" "$LOCAL_IMG" "$VM_STORAGE" --format qcow2 2>&1)
-echo "$IMPORT_OUTPUT" | tail -2
+info "Importiere Disk nach ${VM_STORAGE}..."
+IMPORT_OUT=$(qm importdisk "$VM_ID" "$LOCAL_IMG" "$VM_STORAGE" --format qcow2 2>&1)
+echo "$IMPORT_OUT" | tail -2
 
-# Disk-Referenz aus Output oder qm config lesen
-DISK_REF=$(echo "$IMPORT_OUTPUT" | grep -oP "(?<=imported disk ')[^']+" 2>/dev/null || true)
+# Disk-Referenz aus Output lesen
+DISK_REF=$(echo "$IMPORT_OUT" | grep -oP "(?<=imported disk ')[^']+" || true)
 if [[ -z "$DISK_REF" ]]; then
   sleep 2
-  DISK_REF=$(qm config "$VM_ID" 2>/dev/null | grep "^unused0:" | awk '{print $2}' || true)
+  DISK_REF=$(qm config "$VM_ID" | grep "^unused0:" | awk '{print $2}' || true)
 fi
-[[ -z "$DISK_REF" ]] && error "Disk-Referenz nicht gefunden. Prüfe: qm config ${VM_ID}"
-info "Disk: ${DISK_REF}"
+[[ -z "$DISK_REF" ]] && error "Disk-Referenz nicht gefunden! Prüfe: qm config ${VM_ID}"
+info "Disk-Referenz: ${DISK_REF}"
 
-info "Konfiguriere VM..."
 qm set "$VM_ID" \
   --scsi0     "${DISK_REF},discard=on" \
   --boot      "order=scsi0" \
@@ -203,19 +206,17 @@ qm set "$VM_ID" \
   --ipconfig0 "ip=dhcp" \
   --sshkeys   "${SSH_KEY_PATH}.pub"
 
-info "Disk auf ${VM_DISK_SIZE}GB vergrößern..."
 qm resize "$VM_ID" scsi0 "${VM_DISK_SIZE}G"
 qm cloudinit update "$VM_ID" 2>/dev/null || true
-success "VM ${VM_ID} fertig konfiguriert."
+success "VM ${VM_ID} konfiguriert."
 
-# ── Schritt 6: VM starten + IP ──────────────────────────────
-step "Schritt 6/7 — VM starten & IP ermitteln"
-info "Starte VM..."
+info "VM starten..."
 qm start "$VM_ID"
 
+# ── IP ermitteln ─────────────────────────────────────────────
 VM_IP=""
-info "Warte auf QEMU Guest Agent (max. 5 Min.)..."
-info "Cloud-Init installiert qemu-guest-agent — bitte ~90 Sek. warten..."
+info "Warte auf QEMU Guest Agent + IP (max. 5 Min.)..."
+info "Cloud-Init installiert qemu-guest-agent — bitte ~90 Sek. Geduld..."
 echo ""
 
 for i in $(seq 1 300); do
@@ -236,121 +237,121 @@ except: pass
 
   if [[ -n "$VM_IP" ]]; then
     echo ""
-    success "IP gefunden: ${VM_IP}"
+    success "VM IP: ${VM_IP}"
     break
   fi
-  (( i % 15 == 0 )) && printf "\r  ${CYAN}[%3d/300 Sek.]${NC} Warte...   " "$i"
+  (( i % 15 == 0 )) && printf "\r  ${CYAN}[%3d/300 Sek.]${NC} Warte auf Guest Agent...   " "$i"
 done
 echo ""
 
-# Fallback: MAC → ARP
+# Fallback: ARP
 if [[ -z "$VM_IP" ]]; then
-  warn "Guest Agent hat keine IP — versuche ARP..."
-  VM_MAC=$(qm config "$VM_ID" 2>/dev/null \
-    | grep "^net0" | grep -oiP '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' \
+  warn "Guest Agent hat keine IP gemeldet — versuche ARP..."
+  VM_MAC=$(qm config "$VM_ID" | grep "^net0" \
+    | grep -oiP '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' \
     | tr '[:upper:]' '[:lower:]' | head -1 || true)
   if [[ -n "$VM_MAC" ]]; then
     sleep 5
-    VM_IP=$(arp -an 2>/dev/null | grep -i "$VM_MAC" | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1 || true)
-    [[ -z "$VM_IP" ]] && VM_IP=$(ip neigh 2>/dev/null | grep -i "$VM_MAC" | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1 || true)
+    VM_IP=$(arp -an 2>/dev/null | grep -i "$VM_MAC" \
+      | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1 || true)
+    [[ -z "$VM_IP" ]] && VM_IP=$(ip neigh 2>/dev/null | grep -i "$VM_MAC" \
+      | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1 || true)
   fi
 fi
 
 # Manuell
 if [[ -z "$VM_IP" ]]; then
-  echo -e "  ${YELLOW}→ Proxmox GUI → VM ${VM_ID} → Summary → IP, oder Konsole: ip addr show${NC}"
+  echo -e "${YELLOW}  → Proxmox GUI → VM ${VM_ID} → Summary → IP-Adresse ablesen${NC}"
   read -rp "  VM IP-Adresse eingeben: " VM_IP
   [[ -n "$VM_IP" ]] || error "Keine IP angegeben."
 fi
 
-# SSH warten
+# ── SSH warten ────────────────────────────────────────────────
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes -i ${SSH_KEY_PATH}"
 SSH_OK=false
 info "Warte auf SSH an ${VM_IP}..."
 for i in $(seq 1 40); do
-  ssh $SSH_OPTS root@"$VM_IP" "echo ok" &>/dev/null && SSH_OK=true && break
+  ssh $SSH_OPTS root@"$VM_IP" "echo ok" &>/dev/null 2>&1 && SSH_OK=true && break
   printf "\r  SSH-Versuch %2d/40..." "$i"
   sleep 5
 done
 echo ""
 
 if [[ "$SSH_OK" == false ]]; then
-  warn "SSH noch nicht bereit — warte 60 Sek. mehr..."
+  warn "SSH noch nicht bereit — warte 60 Sek. mehr (Cloud-Init läuft noch)..."
   sleep 60
-  ssh $SSH_OPTS root@"$VM_IP" "echo ok" &>/dev/null \
+  ssh $SSH_OPTS root@"$VM_IP" "echo ok" &>/dev/null 2>&1 \
     && SSH_OK=true \
-    || error "SSH nicht erreichbar.\nManuell: ssh -i ${SSH_KEY_PATH} root@${VM_IP}"
+    || error "SSH nicht erreichbar. Manuell prüfen: ssh -i ${SSH_KEY_PATH} root@${VM_IP}"
 fi
-success "SSH-Verbindung zu ${VM_IP} OK!"
+success "SSH zu ${VM_IP} OK!"
 
-# ── Schritt 7: Paperclip installieren ───────────────────────
-step "Schritt 7/7 — Paperclip in der VM installieren"
-info "Installation läuft — bitte nicht abbrechen..."
+# ── Paperclip Install-Script schreiben und auf VM kopieren ───
+step "Schritt 5/6 — Paperclip in der VM installieren"
 
-ssh $SSH_OPTS root@"$VM_IP" 'bash -s' << 'REMOTE_SCRIPT'
+# Install-Script als lokale Datei schreiben
+INSTALL_SCRIPT="/tmp/paperclip-vm-install.sh"
+
+cat > "$INSTALL_SCRIPT" << 'SCRIPTEOF'
+#!/bin/bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export PAPERCLIP_TELEMETRY_DISABLED=1
 
-echo ""
-echo "==> [1/6] System-Pakete..."
+echo "==> [1/5] System-Pakete..."
 apt-get update -qq
-apt-get install -y -qq curl git wget gnupg ca-certificates lsb-release build-essential ufw
+apt-get install -y -qq \
+  curl git wget gnupg ca-certificates lsb-release build-essential ufw
 
-echo "==> [2/6] Node.js 20..."
+echo "==> [2/5] Node.js 20..."
 if command -v node &>/dev/null && [[ $(node -v | sed 's/v//' | cut -d. -f1) -ge 20 ]]; then
-  echo "    Node.js $(node -v) vorhanden."
+  echo "    Node.js $(node -v) bereits vorhanden."
 else
   curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>/dev/null
   apt-get install -y -qq nodejs
   echo "    Node.js $(node -v) installiert."
 fi
 
-echo "==> [3/6] pnpm installieren..."
-# npm install -g ist zuverlässiger als corepack (keine Berechtigungsprobleme)
-# pnpm@9 weil paperclip pnpm-workspace.yaml nutzt (kompatibel mit v9)
-npm install -g pnpm@9 2>&1 | grep -v "^npm warn" | tail -3
+echo "==> [3/5] pnpm..."
+npm install -g pnpm@9
 
-# npm global bin Verzeichnis ermitteln und pnpm dort verlinken
-NPM_BIN=$(npm bin -g 2>/dev/null || echo "/usr/local/bin")
-PNPM_BIN="${NPM_BIN}/pnpm"
+# Pfad sicherstellen
+NPM_PREFIX=$(npm config get prefix 2>/dev/null || echo "/usr/local")
+PNPM_BIN="${NPM_PREFIX}/bin/pnpm"
 
-# Falls pnpm nicht unter /usr/local/bin liegt — Symlink setzen
-if [[ "$NPM_BIN" != "/usr/local/bin" ]] && [[ -f "$PNPM_BIN" ]]; then
-  ln -sf "$PNPM_BIN" /usr/local/bin/pnpm
+if [[ ! -x "$PNPM_BIN" ]]; then
+  error "pnpm nicht gefunden unter ${PNPM_BIN}"
 fi
 
-# Ausführbar machen (corepack-Berechtigungsproblem vermeiden)
-chmod +x /usr/local/bin/pnpm 2>/dev/null || true
+# Symlink nach /usr/local/bin falls nötig
+if [[ "$NPM_PREFIX" != "/usr/local" ]]; then
+  ln -sf "$PNPM_BIN" /usr/local/bin/pnpm
+  PNPM_BIN="/usr/local/bin/pnpm"
+fi
 
-# Selbsttest
-/usr/local/bin/pnpm --version || { echo "FEHLER: pnpm nicht aufrufbar"; exit 1; }
-echo "    pnpm $(/usr/local/bin/pnpm -v) bereit unter /usr/local/bin/pnpm"
+"$PNPM_BIN" --version
+echo "    pnpm $("$PNPM_BIN" --version) bereit."
 
-echo "==> [4/6] Paperclip klonen..."
+echo "==> [4/5] Paperclip klonen & Dependencies..."
 rm -rf /opt/paperclip
-git clone --depth=1 https://github.com/paperclipai/paperclip.git /opt/paperclip --quiet
+git clone --depth=1 https://github.com/paperclipai/paperclip.git /opt/paperclip
 echo "    $(cd /opt/paperclip && git log --oneline -1)"
 
-echo "==> [5/6] Dependencies (2-5 Min.)..."
 cd /opt/paperclip
-/usr/local/bin/pnpm install --frozen-lockfile 2>&1 | tail -5 \
-  || /usr/local/bin/pnpm install 2>&1 | tail -5
+"$PNPM_BIN" install --frozen-lockfile 2>&1 | tail -5 \
+  || "$PNPM_BIN" install 2>&1 | tail -5
 echo "    Dependencies installiert."
 
-echo "==> [6/6] systemd Service & Firewall..."
-
+echo "==> [5/5] Service & Firewall..."
 [[ -f /opt/paperclip/.env.example ]] \
   && cp /opt/paperclip/.env.example /opt/paperclip/.env \
   || touch /opt/paperclip/.env
 grep -q "PAPERCLIP_TELEMETRY_DISABLED" /opt/paperclip/.env \
   || echo "PAPERCLIP_TELEMETRY_DISABLED=1" >> /opt/paperclip/.env
 
-# Absoluten Pfad verwenden — kein Rätselraten für systemd
-cat > /etc/systemd/system/paperclip.service << 'SVCEOF'
+cat > /etc/systemd/system/paperclip.service << SVCEOF
 [Unit]
 Description=Paperclip AI Orchestration Server
-Documentation=https://github.com/paperclipai/paperclip
 After=network-online.target
 Wants=network-online.target
 
@@ -358,7 +359,7 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/opt/paperclip
-ExecStart=/usr/local/bin/pnpm dev
+ExecStart=${PNPM_BIN} dev
 Restart=on-failure
 RestartSec=15
 StandardOutput=journal
@@ -380,34 +381,51 @@ ufw allow 22/tcp   --quiet 2>/dev/null || true
 ufw allow 3100/tcp --quiet 2>/dev/null || true
 ufw --force enable         2>/dev/null || true
 
-echo "PAPERCLIP_INSTALL_DONE" > /root/paperclip-install-status.txt
-echo "    Fertig!"
-REMOTE_SCRIPT
+echo "DONE" > /root/paperclip-install-status.txt
+echo "==> Installation abgeschlossen!"
+SCRIPTEOF
 
+# Script auf VM kopieren und ausführen
+info "Kopiere Install-Script auf VM..."
+scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no \
+  "$INSTALL_SCRIPT" root@"$VM_IP":/root/paperclip-install.sh
+
+info "Führe Install-Script auf VM aus (dauert 3-8 Min.)..."
+ssh $SSH_OPTS root@"$VM_IP" "bash /root/paperclip-install.sh"
+
+rm -f "$INSTALL_SCRIPT"
 success "Paperclip installiert."
 
-sleep 12
-STATUS=$(ssh $SSH_OPTS root@"$VM_IP" "systemctl is-active paperclip 2>/dev/null || echo unknown" 2>/dev/null || echo "error")
+# ── Prüfen ───────────────────────────────────────────────────
+step "Schritt 6/6 — Dienst prüfen"
+sleep 10
+STATUS=$(ssh $SSH_OPTS root@"$VM_IP" \
+  "systemctl is-active paperclip 2>/dev/null || echo unknown" 2>/dev/null || echo "error")
+
 case "$STATUS" in
-  active)     success "Service: aktiv ✓" ;;
-  activating) success "Service: startet... ✓" ;;
-  *)          warn    "Service-Status: ${STATUS} — prüfe: journalctl -u paperclip -n 30 --no-pager" ;;
+  active)     success "Paperclip Service: aktiv ✓" ;;
+  activating) success "Paperclip Service: startet... ✓" ;;
+  *)          warn    "Service-Status: ${STATUS}"
+              warn    "Prüfe auf der VM: journalctl -u paperclip -n 30 --no-pager" ;;
 esac
 
+# ── Abschluss ────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BOLD}${GREEN}║   ✅  PAPERCLIP AI VOLLSTÄNDIG INSTALLIERT!              ║${NC}"
 echo -e "${BOLD}${GREEN}╠══════════════════════════════════════════════════════════╣${NC}"
 echo -e "${BOLD}${GREEN}║                                                          ║${NC}"
-printf  "${BOLD}${CYAN}║  🚀  http://%-47s║${NC}\n" "${VM_IP}:${PAPERCLIP_PORT}"
+printf  "${BOLD}${CYAN}║  🚀  Paperclip öffnen:                                   ║${NC}\n"
+printf  "${BOLD}${CYAN}║      http://%-47s║${NC}\n" "${VM_IP}:${PAPERCLIP_PORT}"
 echo -e "${BOLD}${GREEN}║                                                          ║${NC}"
-printf  "${BOLD}${GREEN}║  🔑  ssh -i %-47s║${NC}\n" "${SSH_KEY_PATH} root@${VM_IP}"
-printf  "${BOLD}${GREEN}║  🔑  Passwort: %-44s║${NC}\n" "${VM_ROOT_PASS}"
+printf  "${BOLD}${GREEN}║  🔑  SSH:  ssh -i %-41s║${NC}\n" "${SSH_KEY_PATH} root@${VM_IP}"
+printf  "${BOLD}${GREEN}║  🔑  Pass: %-48s║${NC}\n" "${VM_ROOT_PASS}"
 echo -e "${BOLD}${GREEN}║                                                          ║${NC}"
-echo -e "${BOLD}${GREEN}║  📋  journalctl -u paperclip -f          (Live-Log)      ║${NC}"
-echo -e "${BOLD}${GREEN}║  📋  systemctl restart paperclip                         ║${NC}"
+echo -e "${BOLD}${GREEN}║  📋  systemctl status paperclip                          ║${NC}"
+echo -e "${BOLD}${GREEN}║  📋  journalctl -u paperclip -f                          ║${NC}"
 echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  Passwort notieren: ${YELLOW}${VM_ROOT_PASS}${NC}"
-echo -e "  Dann ändern mit: ${CYAN}passwd root${NC}  (in der VM)"
+echo -e "  ${YELLOW}Passwort notieren:${NC} ${VM_ROOT_PASS}"
+echo -e "  ${YELLOW}Hinweis:${NC} Beim ersten Start lädt Paperclip seine Datenbank."
+echo -e "  Bitte 30-60 Sek. warten, dann URL im Browser öffnen."
 echo ""
