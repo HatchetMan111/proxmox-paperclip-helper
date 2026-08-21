@@ -68,9 +68,47 @@ success "Voraussetzungen OK"
 # ── Konfiguration ────────────────────────────────────────────
 step "Konfiguration"
 
-VM_ID=$(pvesh get /cluster/nextid 2>/dev/null || echo "200")
-if ! [[ "$VM_ID" =~ ^[0-9]+$ ]]; then VM_ID=200; fi
-[[ "$VM_ID" -lt 200 ]] && VM_ID=200
+VM_ID=$(pvesh get /cluster/nextid 2>/dev/null || echo "")
+[[ "$VM_ID" =~ ^[0-9]+$ ]] || VM_ID=""
+(( ${VM_ID:-0} < 200 )) && VM_ID=""
+
+# Nächste WIRKLICH freie VM-/CT-ID ab 200 suchen.
+# Bestehende VMs/Container werden NIEMALS gelöscht oder überschrieben!
+find_free_vmid() {
+  local id="${1:-200}"
+  local used
+  used=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null \
+    | python3 -c "
+import sys,json
+try:
+    print(' '.join(str(v['vmid']) for v in json.load(sys.stdin)))
+except Exception:
+    pass
+" 2>/dev/null || true)
+  while :; do
+    if ! qm status "$id" &>/dev/null \
+       && ! pct status "$id" &>/dev/null \
+       && ! echo " $used " | grep -q " $id "; then
+      echo "$id"
+      return 0
+    fi
+    id=$((id + 1))
+    if (( id > 999000 )); then
+      return 1
+    fi
+  done
+}
+
+if [[ -n "$VM_ID" ]]; then
+  # Kandidat von pvesh prüfen — falls belegt, weitersuchen
+  if qm status "$VM_ID" &>/dev/null || pct status "$VM_ID" &>/dev/null; then
+    warn "ID ${VM_ID} ist bereits belegt — suche nächste freie ID..."
+    VM_ID=""
+  fi
+fi
+if [[ -z "$VM_ID" ]]; then
+  VM_ID=$(find_free_vmid 200) || error "Keine freie VM-ID gefunden."
+fi
 
 VM_NAME="paperclip-ai"
 VM_RAM=4096
@@ -189,14 +227,6 @@ success "Cloud-Init Snippet erstellt."
 
 # ── VM erstellen ─────────────────────────────────────────────
 step "Schritt 4/6 — VM erstellen & starten"
-
-if qm status "$VM_ID" &>/dev/null; then
-  warn "VM ${VM_ID} existiert — wird gelöscht..."
-  qm stop "$VM_ID" --skiplock 2>/dev/null || true
-  sleep 5
-  qm destroy "$VM_ID" --purge 2>/dev/null || true
-  sleep 3
-fi
 
 info "Erstelle VM ${VM_ID}..."
 qm create "$VM_ID" \
