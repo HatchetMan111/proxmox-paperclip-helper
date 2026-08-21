@@ -1,6 +1,6 @@
 # 🤖 Proxmox Helper Script — Paperclip AI (All-in-One)
 
-Dieses Repository steht unter der [MIT License](LICENSE).  
+Dieses Repository steht unter der [MIT License](LICENSE).
 Basierend auf [Paperclip AI](https://github.com/paperclipai/paperclip).
 
 💡 Entwickelt mit ❤️ für Proxmox-Homelab-Enthusiasten.
@@ -11,15 +11,15 @@ Basierend auf [Paperclip AI](https://github.com/paperclipai/paperclip).
 
 ## 🧩 Was dieses Script macht
 
-✅ Läuft direkt auf dem **Proxmox HOST** (keine manuelle VM nötig!)  
-✅ Lädt automatisch das **Ubuntu 24.04 Cloud-Image** herunter  
-✅ Erstellt eine neue **Ubuntu VM** (ID, RAM, CPU, Disk, Bridge – alles automatisch)  
-✅ Konfiguriert **Cloud-Init** (Hostname, Root-Passwort, SSH)  
-✅ Startet die VM und wartet auf Boot + IP-Adresse  
-✅ Installiert **Node.js 20**, **pnpm 9.15+** und alle Abhängigkeiten  
-✅ Klont **Paperclip AI** und richtet **systemd Autostart** ein  
-✅ Richtet die **Firewall** ein (Port 3100 + SSH)  
-✅ Gibt am Ende **IP-Adresse + fertige Web-URL** aus  
+✅ Läuft direkt auf dem **Proxmox HOST** (keine manuelle VM nötig!)
+✅ Lädt automatisch das **Ubuntu 24.04 Cloud-Image** herunter
+✅ Erstellt eine neue **Ubuntu VM** (ID, RAM, CPU, Disk, Bridge – alles automatisch)
+✅ Konfiguriert **Cloud-Init** (Hostname, Root-Passwort, SSH)
+✅ Startet die VM und wartet auf Boot + IP-Adresse
+✅ Installiert **Node.js 20**, **pnpm 9.15+** und alle Abhängigkeiten
+✅ Klont **Paperclip AI** und richtet **systemd Autostart** ein
+✅ Richtet die **Firewall** ein (Port 3100 + SSH)
+✅ Gibt am Ende **IP-Adresse + fertige Web-URL** aus
 
 ---
 
@@ -60,10 +60,30 @@ Das Script fragt einmal nach Bestätigung der geplanten Konfiguration – danach
     http://<VM-IP>:3100
 
 🔑  SSH-Zugang:
-    ssh root@<VM-IP>
+    ssh -i /root/.ssh/paperclip_vm_ed25519 root@<VM-IP>
 ```
 
 Einfach die URL im Browser öffnen und loslegen. 🎉
+
+---
+
+## ♻️ Neustart-sicher — keine Zusatzschritte nötig!
+
+Alles läuft nach einem Neustart **vollautomatisch** weiter:
+
+| Ebene | Mechanismus |
+|---|---|
+| VM startet mit dem Host | `onboot=1` (bereits konfiguriert) |
+| Paperclip startet in der VM | systemd Service (`systemctl enable paperclip`) |
+
+Falls sich durch DHCP die IP geändert hat, einfach auf dem **Proxmox Host** ausführen:
+
+```bash
+paperclip-info
+```
+
+Das zeigt dir jederzeit die aktuelle VM-ID, IP-Adresse, Web-URL und den SSH-Befehl an.
+Alle Zugangsdaten findest du außerdem in `/root/paperclip-vm-info.txt`.
 
 ---
 
@@ -84,8 +104,9 @@ Einfach die URL im Browser öffnen und loslegen. 🎉
               ├─ Paperclip klonen (/opt/paperclip)
               ├─ pnpm install
               ├─ .env erstellen
-              ├─ systemd Service einrichten
-              └─ Firewall (Port 3100 + 22)
+              ├─ systemd Service einrichten (autostart)
+              ├─ Firewall (Port 3100 + 22)
+              └─ SSH härten (nur Key-Login)
 ```
 
 ---
@@ -93,8 +114,20 @@ Einfach die URL im Browser öffnen und loslegen. 🎉
 ## 📋 Nützliche Befehle nach der Installation
 
 ```bash
+# Auf dem PROXMOX HOST:
+
+# Aktuelle IP + URL anzeigen (z.B. nach Neustart)
+paperclip-info
+
+# Alle Zugangsdaten
+cat /root/paperclip-vm-info.txt
+
 # In die VM einloggen
-ssh root@<VM-IP>
+ssh -i /root/.ssh/paperclip_vm_ed25519 root@<VM-IP>
+```
+
+```bash
+# In der VM:
 
 # Paperclip Status
 systemctl status paperclip
@@ -111,22 +144,27 @@ nano /opt/paperclip/.env
 
 ---
 
-## 📁 Installationspfade (in der VM)
+## 📁 Installationspfade
 
-| Pfad | Inhalt |
-|---|---|
-| `/opt/paperclip` | Paperclip Installationsverzeichnis |
-| `/opt/paperclip/.env` | Konfigurationsdatei (API Keys etc.) |
-| `/etc/systemd/system/paperclip.service` | systemd Autostart |
+| Ort | Pfad | Inhalt |
+|---|---|---|
+| HOST | `/root/paperclip-vm-info.txt` | Alle Zugangsdaten & Infos |
+| HOST | `/usr/local/bin/paperclip-info` | IP/URL-Anzeige (auch nach Reboot) |
+| HOST | `/root/.ssh/paperclip_vm_ed25519` | SSH-Key für die VM |
+| VM | `/opt/paperclip` | Paperclip Installationsverzeichnis |
+| VM | `/opt/paperclip/.env` | Konfigurationsdatei (API Keys etc.) |
+| VM | `/etc/systemd/system/paperclip.service` | systemd Autostart |
 
 ---
 
 ## 🔐 Sicherheitshinweis
 
-Das Script generiert ein zufälliges Root-Passwort für die VM und zeigt es am Ende an.  
-**Bitte notieren und danach ändern:**
+- Das Script generiert ein **zufälliges Root-Passwort** für die VM. Es funktioniert **ausschließlich in der Proxmox-Konsole (noVNC)** – SSH-Login ist nach der Installation **nur noch per SSH-Key** möglich.
+- Das Cloud-Init-Snippet (mit Passwort-Hash) und die Info-Datei sind nur für `root` lesbar (`chmod 600`).
+- Die Firewall in der VM erlaubt nur SSH (22) und Paperclip (3100).
+
+Root-Passwort ändern (optional, in der Proxmox-Konsole):
 ```bash
-ssh root@<VM-IP>
 passwd root
 ```
 
