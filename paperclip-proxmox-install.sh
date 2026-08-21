@@ -23,6 +23,19 @@ step()    {
   echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
+# Frag den User über das Terminal (funktioniert auch bei
+# bash <(curl ...) und zeigt den Prompt immer sichtbar an).
+# Ergebnis landet in $ANSWER.
+ask() {
+  local prompt="$1" default="${2:-}" reply=""
+  echo -n "$prompt"
+  if read -r reply < /dev/tty 2>/dev/null && [[ -n "$reply" ]]; then
+    ANSWER="$reply"
+  else
+    ANSWER="$default"
+  fi
+}
+
 clear
 echo -e "${BOLD}${CYAN}"
 cat <<'BANNER'
@@ -86,8 +99,8 @@ echo -e "  Storage:  ${CYAN}${VM_STORAGE} (${STORAGE_TYPE})${NC}"
 echo -e "  RAM:      ${CYAN}${VM_RAM} MB${NC}  |  CPU: ${CYAN}${VM_CORES}${NC}  |  Disk: ${CYAN}${VM_DISK_SIZE}GB${NC}"
 echo -e "  Ubuntu:   ${CYAN}${UBUNTU_VERSION} LTS${NC}  |  Port: ${CYAN}${PAPERCLIP_PORT}${NC}"
 echo ""
-read -rp "  Fortfahren? [J/n]: " CONFIRM </dev/tty 2>/dev/null || CONFIRM="j"
-CONFIRM="${CONFIRM:-j}"
+ask "  Fortfahren? [J/n]: " "j"
+CONFIRM="$ANSWER"
 [[ "$CONFIRM" =~ ^[jJyY]$ ]] || error "Abgebrochen."
 
 # ── SSH-Key ──────────────────────────────────────────────────
@@ -275,7 +288,8 @@ fi
 # Manuell
 if [[ -z "$VM_IP" ]]; then
   echo -e "${YELLOW}  → Proxmox GUI → VM ${VM_ID} → Summary → IP-Adresse ablesen${NC}"
-  read -rp "  VM IP-Adresse eingeben: " VM_IP </dev/tty 2>/dev/null || true
+  ask "  VM IP-Adresse eingeben: " ""
+  VM_IP="$ANSWER"
   [[ -n "$VM_IP" ]] || error "Keine IP angegeben."
 fi
 
